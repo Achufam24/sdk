@@ -11,7 +11,7 @@ export class LoggingMiddleware implements NestMiddleware {
   constructor(private readonly loggingService: LoggingService) {}
 
   use(req: Request, res: Response, next: NextFunction) {
-    const requestId = uuidv4(); // Generate unique request ID
+    const requestId = uuidv4(); 
     const { method, url, headers, body, ip } = req;
     const userAgent = headers['user-agent'] || '';
     const timestamp = new Date().toISOString();
@@ -27,15 +27,12 @@ export class LoggingMiddleware implements NestMiddleware {
       type: 'request',
     };
 
-    // Log locally
     this.logger.log(requestLog);
     
-    // Save to backend server
     this.loggingService.saveLog(requestLog);
 
     const now = Date.now();
     
-    // Capture response data
     const originalSend = res.send;
     res.send = function (body) {
       const responseTime = Date.now() - now;
@@ -48,13 +45,11 @@ export class LoggingMiddleware implements NestMiddleware {
         statusCode: res.statusCode,
         responseTime: `${responseTime}ms`,
         type: 'response',
-        body: body // You might want to sanitize this too
+        body: body
       };
 
-      // Log locally
       this.logger.log(responseLog);
       
-      // Save to backend server
       this.loggingService.saveLog(responseLog);
       
       return originalSend.call(this, body);
@@ -66,16 +61,15 @@ export class LoggingMiddleware implements NestMiddleware {
   private sanitizeBody(body: any): any {
     if (!body) return body;
     
-    // Create a copy of the body to avoid modifying the original
     const sanitizedBody = { ...body };
     
     // Remove sensitive information (customize as needed)
-    const sensitiveFields = ['password', 'token', 'authorization', 'apiKey'];
-    sensitiveFields.forEach(field => {
-      if (field in sanitizedBody) {
-        sanitizedBody[field] = '[REDACTED]';
-      }
-    });
+    // const sensitiveFields = ['password', 'token', 'authorization', 'apiKey'];
+    // sensitiveFields.forEach(field => {
+    //   if (field in sanitizedBody) {
+    //     sanitizedBody[field] = '[REDACTED]';
+    //   }
+    // });
     
     return sanitizedBody;
   }

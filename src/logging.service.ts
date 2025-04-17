@@ -1,28 +1,25 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import axios from 'axios';
 import { RequestLog, ResponseLog, CombinedLog } from './interfaces/log.interface';
 
 export interface LoggingOptions {
-  // Optional API URL - if not provided, logs will only be stored in memory
   apiUrl?: string;
-  
-  // Required fields
   apiKey: string;
   appId: string;
   environment: string;
 }
 
 @Injectable()
-export class LoggingService {
+export class LoggingService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(LoggingService.name);
   private readonly apiUrl?: string;
   private readonly apiKey: string;
   private readonly appId: string;
   private readonly environment: string;
   private readonly pendingLogs: Map<string, Partial<CombinedLog>> = new Map();
+  private cleanupInterval?: NodeJS.Timeout;
 
   constructor(options: LoggingOptions) {
-    // Validate required fields
     if (!options.apiKey) {
       throw new Error('apiKey is required in LoggingOptions');
     }
@@ -39,6 +36,52 @@ export class LoggingService {
     this.environment = options.environment;
   }
 
+  onModuleInit() {
+    this.cleanupInterval = setInterval(() => {
+      this.cleanupStaleRequests();
+    }, 5 * 60 * 1000);
+  }
+
+  onModuleDestroy() {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+    }
+  }
+
+  private getUrlPath(url: string): string {
+    try {
+      const urlObj = new URL(url);
+      return urlObj.pathname;
+    } catch (error) {
+      this.logger.warn(`Failed to parse URL: ${url}`, error);
+      return url;
+    }
+  }
+
+  private stringifyRequestBody(body: any): string {
+    try {
+      if (typeof body === 'string') {
+        return body;
+      }
+      return JSON.stringify(body);
+    } catch (error) {
+      this.logger.warn('Failed to stringify request body', error);
+      return '[Unable to stringify request body]';
+    }
+  }
+
+  private stringifyResponseBody(body: any): string {
+    try {
+      if (typeof body === 'string') {
+        return body;
+      }
+      return JSON.stringify(body);
+    } catch (error) {
+      this.logger.warn('Failed to stringify response body', error);
+      return '[Unable to stringify response body]';
+    }
+  }
+
   async saveLog(logData: RequestLog | ResponseLog): Promise<void> {
     const { requestId } = logData;
     let pendingLog = this.pendingLogs.get(requestId) || {
@@ -48,14 +91,22 @@ export class LoggingService {
     };
 
     if (logData.type === 'request') {
-      pendingLog.request = logData;
+      const requestLog = {
+        ...logData,
+        path: this.getUrlPath(logData.url),
+        body: this.stringifyRequestBody(logData.body),
+      };
+      pendingLog.request = requestLog;
     } else {
-      pendingLog.response = logData;
+      const responseLog = {
+        ...logData,
+        body: this.stringifyResponseBody(logData.body),
+      };
+      pendingLog.response = responseLog;
     }
 
     this.pendingLogs.set(requestId, pendingLog);
 
-    // If we have both request and response, process the combined log
     if (pendingLog.request && pendingLog.response) {
       const combinedLog = {
         ...pendingLog,
@@ -64,10 +115,10 @@ export class LoggingService {
         timestamp: new Date().toISOString(),
       } as CombinedLog;
 
-      // Log locally
+
       this.logger.log('Combined log:', combinedLog);
 
-      // If apiUrl is provided, send to backend
+
       if (this.apiUrl) {
         try {
           await axios.post(this.apiUrl, combinedLog, {
@@ -81,21 +132,29 @@ export class LoggingService {
         }
       }
 
-      // Clear from pending logs after processing
       this.pendingLogs.delete(requestId);
     }
   }
 
-  // Cleanup method to prevent memory leaks
   private cleanupStaleRequests() {
-    const staleTimeout = 30 * 60 * 1000; // 30 minutes
+    const staleTimeout = 30 * 60 * 1000; 
     const now = Date.now();
+    let cleanedCount = 0;
 
-    for (const [requestId, log] of this.pendingLogs.entries()) {
-      const timestamp = new Date(log.request?.timestamp || log.response?.timestamp || '').getTime();
-      if (now - timestamp > staleTimeout) {
-        this.pendingLogs.delete(requestId);
+    try {
+      for (const [requestId, log] of this.pendingLogs.entries()) {
+        const timestamp = new Date(log.request?.timestamp || log.response?.timestamp || '').getTime();
+        if (now - timestamp > staleTimeout) {
+          this.pendingLogs.delete(requestId);
+          cleanedCount++;
+        }
       }
+
+      if (cleanedCount > 0) {
+        this.logger.debug(`Cleaned up ${cleanedCount} stale request logs`);
+      }
+    } catch (error) {
+      this.logger.error('Error during cleanup of stale requests', error);
     }
   }
 } 
