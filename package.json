@@ -1,0 +1,50 @@
+{
+  "name": "nugi-logs-sdk",
+  "version": "1.0.0",
+  "description": "NestJS logging SDK for saving logs to a backend server",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "prepublishOnly": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yourusername/nugi-logs-sdk.git"
+  },
+  "keywords": [
+    "nestjs",
+    "logging",
+    "sdk",
+    "middleware",
+    "request",
+    "response"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/yourusername/nugi-logs-sdk/issues"
+  },
+  "homepage": "https://github.com/yourusername/nugi-logs-sdk#readme",
+  "dependencies": {
+    "@nestjs/common": "^10.0.0",
+    "@nestjs/core": "^10.0.0",
+    "axios": "^1.6.0",
+    "reflect-metadata": "^0.1.13",
+    "rxjs": "^7.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "peerDependencies": {
+    "@nestjs/common": "^10.0.0",
+    "@nestjs/core": "^10.0.0"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ]
+} 
