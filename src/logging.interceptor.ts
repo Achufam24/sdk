@@ -8,6 +8,8 @@ import {
 import { Observable } from 'rxjs';
 import { tap } from 'rxjs/operators';
 import { LoggingService } from './logging.service';
+import { v4 as uuidv4 } from 'uuid';
+import { RequestLog, ResponseLog } from './interfaces/log.interface';
 
 @Injectable()
 export class LoggingInterceptor implements NestInterceptor {
@@ -16,48 +18,70 @@ export class LoggingInterceptor implements NestInterceptor {
   constructor(private readonly loggingService: LoggingService) {}
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
-    const request = context.switchToHttp().getRequest();
-    const { method, url, headers, body, ip } = request;
+    const requestId = uuidv4();
+    const ctx = context.switchToHttp();
+    const request = ctx.getRequest();
+    const { method, url, body, headers, ip } = request;
     const userAgent = headers['user-agent'] || '';
     const timestamp = new Date().toISOString();
 
-    const requestLog = {
+    // Log request
+    const requestLog: RequestLog = {
+      requestId,
       timestamp,
       method,
       url,
       userAgent,
       ip,
       body: this.sanitizeBody(body),
-      type: 'request',
+      type: 'request'
     };
 
-    // Log locally
     this.logger.log(requestLog);
-    
-    // Save to backend server
     this.loggingService.saveLog(requestLog);
 
     const now = Date.now();
-    return next.handle().pipe(
-      tap(() => {
-        const response = context.switchToHttp().getResponse();
-        const responseTime = Date.now() - now;
-        
-        const responseLog = {
-          timestamp: new Date().toISOString(),
-          method,
-          url,
-          statusCode: response.statusCode,
-          responseTime: `${responseTime}ms`,
-          type: 'response',
-        };
 
-        // Log locally
-        this.logger.log(responseLog);
-        
-        // Save to backend server
-        this.loggingService.saveLog(responseLog);
-      }),
+    return next.handle().pipe(
+      tap({
+        next: (body: any) => {
+          const responseTime = Date.now() - now;
+          
+          const responseLog: ResponseLog = {
+            requestId,
+            timestamp: new Date().toISOString(),
+            method,
+            url,
+            statusCode: context.switchToHttp().getResponse().statusCode,
+            responseTime: `${responseTime}ms`,
+            type: 'response',
+            body: this.sanitizeBody(body)
+          };
+
+          this.logger.log(responseLog);
+          this.loggingService.saveLog(responseLog);
+        },
+        error: (error: any) => {
+          const responseTime = Date.now() - now;
+          
+          const responseLog: ResponseLog = {
+            requestId,
+            timestamp: new Date().toISOString(),
+            method,
+            url,
+            statusCode: error.status || 500,
+            responseTime: `${responseTime}ms`,
+            type: 'response',
+            body: {
+              error: error.message,
+              stack: error.stack
+            }
+          };
+
+          this.logger.error(responseLog);
+          this.loggingService.saveLog(responseLog);
+        }
+      })
     );
   }
 
