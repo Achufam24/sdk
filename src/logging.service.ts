@@ -136,6 +136,29 @@ export class LoggingService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  async logQuery(query: string, durationMs: number, requestId?: string): Promise<void> {
+    if (this.apiUrl) {
+      try {
+        await axios.post(this.apiUrl, {
+          appId: this.appId,
+          environment: this.environment,
+          type: 'query',
+          query,
+          durationMs,
+          requestId,
+          timestamp: new Date().toISOString(),
+        }, {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-API-Key': this.apiKey,
+          },
+        });
+      } catch (error) {
+        this.logger.error('Failed to send query log to backend server', error);
+      }
+    }
+  }
+
   private cleanupStaleRequests() {
     const staleTimeout = 30 * 60 * 1000; 
     const now = Date.now();

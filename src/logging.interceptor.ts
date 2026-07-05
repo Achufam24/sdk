@@ -15,7 +15,7 @@ import { RequestLog, ResponseLog } from './interfaces/log.interface';
 export class LoggingInterceptor implements NestInterceptor {
   private readonly logger = new Logger(LoggingInterceptor.name);
 
-  constructor(private readonly loggingService: LoggingService) {}
+  constructor(private readonly loggingService: LoggingService) { }
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
     const requestId = uuidv4();
@@ -46,7 +46,7 @@ export class LoggingInterceptor implements NestInterceptor {
       tap({
         next: (body: any) => {
           const responseTime = Date.now() - now;
-          
+
           const responseLog: ResponseLog = {
             requestId,
             timestamp: new Date().toISOString(),
@@ -63,7 +63,7 @@ export class LoggingInterceptor implements NestInterceptor {
         },
         error: (error: any) => {
           const responseTime = Date.now() - now;
-          
+
           const responseLog: ResponseLog = {
             requestId,
             timestamp: new Date().toISOString(),
@@ -87,10 +87,10 @@ export class LoggingInterceptor implements NestInterceptor {
 
   private sanitizeBody(body: any): any {
     if (!body) return body;
-    
+
     // Create a copy of the body to avoid modifying the original
     const sanitizedBody = { ...body };
-    
+
     // Remove sensitive information (customize as needed)
     const sensitiveFields = ['password', 'token', 'authorization', 'apiKey'];
     sensitiveFields.forEach(field => {
@@ -98,7 +98,7 @@ export class LoggingInterceptor implements NestInterceptor {
         sanitizedBody[field] = '[REDACTED]';
       }
     });
-    
+
     return sanitizedBody;
   }
 } 
