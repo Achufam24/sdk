@@ -1,5 +1,7 @@
 import { Logger } from '@nestjs/common';
 import axios from 'axios';
+import { sharedBreadcrumbs } from './breadcrumbs';
+import { getHostMetadata, getRuntimeMetadata } from './metadata';
 
 const logger = new Logger('ErrorReporting');
 
@@ -8,6 +10,10 @@ export interface ErrorMetadata {
   stack?: string;
   code?: string | number;
   context?: Record<string, any>;
+  // How the error was captured, e.g. 'auto.node.uncaughtException'.
+  mechanism?: string;
+  // false when the error was uncaught / crashed a request. Default true.
+  handled?: boolean;
 }
 
 export interface ErrorReportingConfig {
@@ -43,22 +49,30 @@ export async function ReportError(
     }
 
     const errorObject = error instanceof Error ? error : new Error(String(error));
+    const { context, mechanism, handled, ...errorMeta } = metadata;
 
     const errorLog = {
       type: 'error',
       timestamp: new Date().toISOString(),
       appId: globalConfig.appId,
       environment: globalConfig.environment,
+      // Correlation / grouping metadata for the Sentry-style Errors view.
+      handled: handled ?? true,
+      mechanism: mechanism ?? (handled === false ? 'auto' : 'manual'),
+      // Snapshot of the breadcrumb trail (console/logs) leading up to the error.
+      breadcrumbs: sharedBreadcrumbs.snapshot(),
       error: {
         name: errorObject.name,
         message: errorObject.message,
         stack: errorObject.stack,
-        ...metadata,
+        ...errorMeta,
       },
       context: {
-        ...metadata.context,
+        ...context,
         nodeVersion: process.version,
         platform: process.platform,
+        // Host + runtime snapshot so the error carries device/OS/runtime context.
+        meta: { ...getHostMetadata(), ...getRuntimeMetadata() },
       }
     };
 

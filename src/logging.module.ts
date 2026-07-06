@@ -1,6 +1,7 @@
 import { Module, DynamicModule, MiddlewareConsumer, NestModule } from '@nestjs/common';
 import { LoggingMiddleware } from './logging.middleware';
 import { LoggingService, LoggingOptions } from './logging.service';
+import { NugiLoggerService } from './logger.service';
 
 @Module({})
 export class LoggingModule implements NestModule {
@@ -15,16 +16,21 @@ export class LoggingModule implements NestModule {
   }
 
   static forRoot(options: LoggingOptions): DynamicModule {
+    const loggingService = new LoggingService(options);
     return {
       module: LoggingModule,
       providers: [
         {
           provide: LoggingService,
-          useValue: new LoggingService(options),
+          useValue: loggingService,
+        },
+        {
+          provide: NugiLoggerService,
+          useValue: new NugiLoggerService(loggingService),
         },
         LoggingMiddleware,
       ],
-      exports: [LoggingService],
+      exports: [LoggingService, NugiLoggerService],
     };
   }
 } 

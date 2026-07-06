@@ -2,6 +2,10 @@ import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/commo
 import axios from 'axios';
 import { RequestLog, ResponseLog, CombinedLog, LogMetadata } from './interfaces/log.interface';
 import { getHostMetadata, getRuntimeMetadata } from './metadata';
+import { sharedBreadcrumbs, BreadcrumbLevel } from './breadcrumbs';
+import { ConsoleCapture, ConsoleMethod } from './console.capture';
+
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'fatal';
 
 export interface LoggingOptions {
   apiUrl?: string;
@@ -13,6 +17,14 @@ export interface LoggingOptions {
   // Extra field names to redact from captured bodies/headers, in addition to
   // the built-in sensitive patterns. Case-insensitive exact match, any depth.
   redact?: string[];
+  // Capture the service's own console output (console.log/info/warn/error/debug)
+  // as telemetry — so a service reports logs even with zero HTTP traffic.
+  // Captured calls also become breadcrumbs. Default true.
+  captureConsole?: boolean;
+  // Console methods to intercept when captureConsole is on. Default all.
+  consoleLevels?: ConsoleMethod[];
+  // Max breadcrumbs retained and attached to error reports. Default 50.
+  maxBreadcrumbs?: number;
 }
 
 // Logging must never block or slow down the host application. Cap every
@@ -31,6 +43,9 @@ export class LoggingService implements OnModuleInit, OnModuleDestroy {
   readonly redact: string[];
   private readonly pendingLogs: Map<string, Partial<CombinedLog>> = new Map();
   private cleanupInterval?: NodeJS.Timeout;
+  private readonly captureConsole: boolean;
+  private readonly consoleLevels: ConsoleMethod[];
+  private consoleCapture?: ConsoleCapture;
 
   constructor(options: LoggingOptions) {
     if (!options.apiKey) {
@@ -51,6 +66,12 @@ export class LoggingService implements OnModuleInit, OnModuleDestroy {
     this.redact = Array.isArray(options.redact)
       ? options.redact.filter((k) => typeof k === 'string' && k.length > 0)
       : [];
+    this.captureConsole = options.captureConsole ?? true;
+    this.consoleLevels =
+      Array.isArray(options.consoleLevels) && options.consoleLevels.length > 0
+        ? options.consoleLevels
+        : ['debug', 'info', 'log', 'warn', 'error'];
+    sharedBreadcrumbs.setCapacity(options.maxBreadcrumbs ?? 50);
   }
 
   // Assembles host + runtime + service metadata for an outbound log. Host data
@@ -70,11 +91,83 @@ export class LoggingService implements OnModuleInit, OnModuleDestroy {
     }, 5 * 60 * 1000);
     // Don't let the background timer keep the host process alive on shutdown.
     this.cleanupInterval.unref?.();
+
+    // Capture the service's own console output so it reports telemetry even
+    // with zero HTTP traffic, and so console calls become error breadcrumbs.
+    if (this.captureConsole) {
+      this.consoleCapture = new ConsoleCapture(sharedBreadcrumbs, {
+        levels: this.consoleLevels,
+        onLog: ({ level, message, timestamp }) => {
+          // Fire-and-forget; capture must never block the caller.
+          void this.sendLog(level, message, { origin: 'auto.console.logging' }, timestamp);
+        },
+      });
+      this.consoleCapture.start();
+    }
   }
 
   onModuleDestroy() {
     if (this.cleanupInterval) {
       clearInterval(this.cleanupInterval);
+    }
+    this.consoleCapture?.stop();
+  }
+
+  // ---- Manual structured logging -------------------------------------------
+  // Public log API mirroring the TS SDK's Logger. Every record ships as a log
+  // event (landing in the server's _logs measurement) and becomes a breadcrumb.
+
+  debug(message: string, attributes?: Record<string, unknown>): void {
+    void this.sendLog('debug', message, attributes);
+  }
+  info(message: string, attributes?: Record<string, unknown>): void {
+    void this.sendLog('info', message, attributes);
+  }
+  warn(message: string, attributes?: Record<string, unknown>): void {
+    void this.sendLog('warn', message, attributes);
+  }
+  error(message: string, attributes?: Record<string, unknown>): void {
+    void this.sendLog('error', message, attributes);
+  }
+  log(level: LogLevel, message: string, attributes?: Record<string, unknown>): void {
+    void this.sendLog(level, message, attributes);
+  }
+
+  /**
+   * Ship a single log event to the backend as `type: 'log'`. Never throws and
+   * never rejects — safe to call fire-and-forget. Also records a breadcrumb.
+   */
+  async sendLog(
+    level: LogLevel,
+    message: string,
+    attributes?: Record<string, unknown>,
+    timestamp?: string,
+  ): Promise<void> {
+    try {
+      const ts = timestamp || new Date().toISOString();
+      sharedBreadcrumbs.add({ timestamp: ts, type: 'log', level: level as BreadcrumbLevel, message, data: attributes });
+
+      if (!this.apiUrl) return;
+      await axios.post(
+        this.apiUrl,
+        {
+          appId: this.appId,
+          environment: this.environment,
+          serviceName: this.serviceName,
+          type: 'log',
+          level,
+          message: String(message),
+          attributes,
+          timestamp: ts,
+          meta: this.buildMetadata(),
+        },
+        {
+          timeout: REQUEST_TIMEOUT_MS,
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': this.apiKey },
+        },
+      );
+    } catch (error) {
+      this.logger.error('Failed to send log event to backend server', this.describeError(error));
     }
   }
 
