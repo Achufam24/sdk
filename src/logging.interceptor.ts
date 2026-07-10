@@ -12,7 +12,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { RequestLog, ResponseLog } from './interfaces/log.interface';
 import { extractTraceContext } from './metadata';
 import { sanitizeBody, sanitizeHeaders } from './sanitize';
-import { byteLength, extractUserId } from './http.util';
+import { byteLength, extractUserId, resolveClientIp } from './http.util';
 
 @Injectable()
 export class LoggingInterceptor implements NestInterceptor {
@@ -35,7 +35,8 @@ export class LoggingInterceptor implements NestInterceptor {
       const request = ctx.getRequest();
       const headers = request.headers || {};
       ({ method, url } = request);
-      const { body, ip } = request;
+      const { body } = request;
+      const ip = resolveClientIp(request);
       const userAgent = headers['user-agent'] || '';
       const timestamp = new Date().toISOString();
       ({ traceId, spanId } = extractTraceContext(headers));

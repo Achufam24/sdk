@@ -5,7 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { RequestLog, ResponseLog } from './interfaces/log.interface';
 import { extractTraceContext } from './metadata';
 import { sanitizeBody, sanitizeHeaders } from './sanitize';
-import { byteLength, extractUserId } from './http.util';
+import { byteLength, extractUserId, resolveClientIp } from './http.util';
 
 @Injectable()
 export class LoggingMiddleware implements NestMiddleware {
@@ -18,7 +18,8 @@ export class LoggingMiddleware implements NestMiddleware {
     // swallowed and the request continues untouched.
     try {
       const requestId = uuidv4();
-      const { method, url, headers, body, ip } = req;
+      const { method, url, headers, body } = req;
+      const ip = resolveClientIp(req);
       const userAgent = (headers['user-agent'] as string) || '';
       const timestamp = new Date().toISOString();
       const { traceId, spanId } = extractTraceContext(headers);

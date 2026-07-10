@@ -10,7 +10,10 @@ import * as os from 'os';
 
 export interface HostMetadata {
   hostname: string;
+  /** Primary server IP (prefers IPv4 for readability, falls back to IPv6). */
   serverIp: string;
+  /** All resolved server IPs, both IPv4 and IPv6. */
+  serverIps: { ipv4: string[]; ipv6: string[] };
   sdkVersion: string;
   nodeVersion: string;
   os: string;
@@ -48,21 +51,38 @@ function resolveSdkVersion(): string {
   }
 }
 
-function resolveServerIp(): string {
+interface ResolvedIps {
+  primary: string;
+  ipv4: string[];
+  ipv6: string[];
+}
+
+function resolveServerIps(): ResolvedIps {
+  const ipv4: string[] = [];
+  const ipv6: string[] = [];
   try {
     const interfaces = os.networkInterfaces();
     for (const name of Object.keys(interfaces)) {
       for (const iface of interfaces[name] || []) {
-        // First non-internal IPv4 address is the best "server IP" guess.
-        if (iface.family === 'IPv4' && !iface.internal) {
-          return iface.address;
+        if (iface.internal) continue;
+        // Node 18.4+ may report family as numeric 4/6; coerce to string.
+        const family = String(iface.family);
+        if (family === 'IPv4' || family === '4') {
+          ipv4.push(iface.address);
+        } else if (family === 'IPv6' || family === '6') {
+          // Skip link-local (fe80::) addresses — they're interface-scoped
+          // and not useful for cross-host identification.
+          if (!iface.address.startsWith('fe80')) {
+            ipv6.push(iface.address);
+          }
         }
       }
     }
   } catch {
     /* fall through */
   }
-  return '127.0.0.1';
+  const primary = ipv4[0] || ipv6[0] || '127.0.0.1';
+  return { primary, ipv4, ipv6 };
 }
 
 let cachedHost: HostMetadata | undefined;
@@ -70,9 +90,11 @@ let cachedHost: HostMetadata | undefined;
 export function getHostMetadata(): HostMetadata {
   if (cachedHost) return cachedHost;
   try {
+    const ips = resolveServerIps();
     cachedHost = {
       hostname: os.hostname(),
-      serverIp: resolveServerIp(),
+      serverIp: ips.primary,
+      serverIps: { ipv4: ips.ipv4, ipv6: ips.ipv6 },
       sdkVersion: resolveSdkVersion(),
       nodeVersion: process.version,
       os: `${os.type()} ${os.release()} (${os.platform()}/${os.arch()})`,
@@ -82,6 +104,7 @@ export function getHostMetadata(): HostMetadata {
     cachedHost = {
       hostname: 'unknown',
       serverIp: '127.0.0.1',
+      serverIps: { ipv4: [], ipv6: [] },
       sdkVersion: resolveSdkVersion(),
       nodeVersion: process.version,
       os: 'unknown',

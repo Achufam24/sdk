@@ -35,3 +35,39 @@ export function extractUserId(req: any): string | undefined {
     return undefined;
   }
 }
+
+/**
+ * Resolve the real client IP from the request. Handles:
+ * - x-forwarded-for header (first entry = real client behind proxy/LB)
+ * - IPv4-mapped IPv6 addresses (::ffff:192.168.1.1 → 192.168.1.1)
+ * - IPv6 loopback (::1)
+ * - Falls back to req.ip (Express respects trust proxy)
+ */
+export function resolveClientIp(req: any): string {
+  try {
+    const forwarded = req?.headers?.['x-forwarded-for'];
+    const raw: string =
+      (typeof forwarded === 'string' ? forwarded.split(',')[0]?.trim() : undefined)
+      || req?.ip
+      || req?.socket?.remoteAddress
+      || '';
+    return normalizeIp(raw);
+  } catch {
+    return req?.ip || '';
+  }
+}
+
+/**
+ * Normalize an IP address:
+ * - Strip IPv4-mapped IPv6 prefix (::ffff:10.0.0.1 → 10.0.0.1)
+ * - Trim whitespace
+ */
+export function normalizeIp(ip: string): string {
+  if (!ip) return ip;
+  const trimmed = ip.trim();
+  const V4_MAPPED_PREFIX = '::ffff:';
+  if (trimmed.toLowerCase().startsWith(V4_MAPPED_PREFIX)) {
+    return trimmed.slice(V4_MAPPED_PREFIX.length);
+  }
+  return trimmed;
+}

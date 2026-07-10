@@ -58,7 +58,7 @@ export class LoggingService implements OnModuleInit, OnModuleDestroy {
       throw new Error('environment is required in LoggingOptions');
     }
 
-    this.apiUrl = options.apiUrl ?? "https://2239-102-90-100-55.ngrok-free.app";
+    this.apiUrl = options.apiUrl;
     this.apiKey = options.apiKey;
     this.appId = options.appId;
     this.environment = options.environment;

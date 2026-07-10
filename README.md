@@ -1,6 +1,6 @@
 # Nugi Logs SDK
 
-A NestJS logging SDK that captures request and response data, correlates them, and provides error reporting capabilities.
+A NestJS logging SDK that captures HTTP request/response pairs, structured logs, database queries, and errors — then ships them to a [Nugi Logs server](https://github.com/Achufam24/nugi-logs-server) with automatic redaction, distributed tracing, breadcrumbs, and fault-tolerant delivery.
 
 ## Installation
 
@@ -8,23 +8,24 @@ A NestJS logging SDK that captures request and response data, correlates them, a
 npm install nugi-logs-sdk
 ```
 
+Peer dependencies: `@nestjs/common` (^9 || ^10 || ^11), `rxjs` (^7).
+
 ## Features
 
-- 🔄 Request-Response Correlation
-- 🧭 Distributed-trace correlation (W3C `traceparent`) — `traceId` / `spanId` on every log
-- 🚨 Error Reporting
-- 📊 Automatic Request/Response Logging
-- 🖥️ Rich host & runtime metadata (hostname, server IP, OS, PID, memory, CPU, versions)
-- 🗄️ Database query logging
-- 🔒 Sensitive Data Redaction (built-in patterns + custom `redact` list)
-- 🛡️ Fault-tolerant & non-blocking — never crashes or slows the host app
-- 🎯 Customizable Route Configuration
+- **HTTP request/response logging** — automatic middleware captures every request lifecycle
+- **Structured manual logging** — `debug()`, `info()`, `warn()`, `error()`, `log()` APIs
+- **Database query logging** — `logQuery()` for SQL timing telemetry
+- **Error reporting** — `ReportError()` with Sentry-style breadcrumb trail
+- **Console capture** — monkey-patches `console.*` to ship logs even with zero HTTP traffic
+- **NestJS Logger bridge** — `NugiLoggerService` replaces the built-in framework logger
+- **Distributed tracing** — W3C `traceparent`, `x-trace-id`, `x-b3-traceid`, `x-amzn-trace-id`
+- **IPv4 + IPv6 server IPs** — resolves all non-internal interfaces, both address families
+- **Client IP normalization** — strips `::ffff:` mapped prefixes, reads `x-forwarded-for`
+- **Sensitive data redaction** — built-in patterns + custom `redact` list
+- **Host & runtime metadata** — hostname, IPs, OS, PID, memory, CPU on every log
+- **Fault-tolerant** — never crashes, blocks, or slows the host app
 
-## Usage
-
-### Basic Setup
-
-Import the `LoggingModule` in your app module and configure it with `forRoot`:
+## Quick Start
 
 ```typescript
 import { Module } from '@nestjs/common';
@@ -33,184 +34,225 @@ import { LoggingModule } from 'nugi-logs-sdk';
 @Module({
   imports: [
     LoggingModule.forRoot({
-      apiUrl: 'https://your-logging-server.com/api/v1/logs', // Optional
-      apiKey: 'your-api-key', // Required
-      appId: 'your-app-id', // Required
-      environment: 'production', // Required
-      serviceName: 'checkout-service', // Optional (defaults to appId)
-      redact: ['ssn', 'creditCard'], // Optional extra fields to redact
+      apiUrl: 'https://your-server.com/api/v1/logs',
+      apiKey: 'nugi_sk_...',
+      appId: 'your-app-id',
+      environment: 'production',
     }),
   ],
 })
 export class AppModule {}
 ```
 
-### Configuration Options
+This applies `LoggingMiddleware` to all routes automatically.
 
-The `LoggingModule.forRoot()` method accepts the following options:
+## Configuration
 
-- `apiUrl` (optional): Full URL of your logging server's ingest endpoint, **including the path** — e.g. `https://host/api/v1/logs`. The SDK POSTs directly to this URL (error reports go to `<apiUrl>/errors`). If not provided, logs are only stored locally.
-- `apiKey` (required): API key for authentication with your logging server (sent as the `X-API-Key` header).
-- `appId` (required): Identifier for your application.
-- `environment` (required): Environment name (e.g., 'development', 'production').
-- `serviceName` (optional): Logical service name attached to every log. Defaults to `appId`.
-- `redact` (optional): Extra field names to redact from bodies and headers, in addition to the built-in patterns. Matched case-insensitively by exact field name at any nesting depth.
+| Option | Required | Default | Description |
+|--------|----------|---------|-------------|
+| `apiUrl` | No | `undefined` | Full URL of the logging server ingest endpoint (e.g. `https://host/api/v1/logs`). SDK POSTs directly here; error reports go to `<apiUrl>/errors`. Omit for local-only logging. |
+| `apiKey` | Yes | — | API key sent as `X-API-Key` header |
+| `appId` | Yes | — | Application identifier |
+| `environment` | Yes | — | Environment name (`production`, `staging`, `development`) |
+| `serviceName` | No | `appId` | Logical service name on every log |
+| `redact` | No | `[]` | Extra field names to redact (case-insensitive exact match, any depth) |
+| `captureConsole` | No | `true` | Intercept `console.*` and ship as telemetry |
+| `consoleLevels` | No | all | Which console methods to capture: `debug`, `info`, `log`, `warn`, `error` |
+| `maxBreadcrumbs` | No | `50` | Ring buffer capacity for error context trail |
 
-> **Note:** `apiUrl` must include the endpoint path (`/api/v1/logs`). The SDK sends the combined log directly to `apiUrl`, so a bare host will 404.
+> **`apiUrl` must include the endpoint path** (e.g. `/api/v1/logs`). The SDK sends directly to this URL.
 
-### Request-Response Correlation
+## Structured Logging
 
-The SDK automatically correlates requests and responses using a unique request ID. This allows you to track the complete lifecycle of each request:
-
-```typescript
-// Logs will include:
-{
-  requestId: "unique-uuid",
-  request: {
-    timestamp: "2024-03-20T10:00:00Z",
-    method: "POST",
-    url: "/api/users",
-    // ... other request data
-  },
-  response: {
-    timestamp: "2024-03-20T10:00:01Z",
-    statusCode: 201,
-    responseTime: "120ms",
-    // ... other response data
-  },
-  appId: "your-app-id",
-  environment: "production"
-}
-```
-
-### Error Reporting
-
-The SDK provides a dedicated error reporting function that you can use throughout your application:
-
-1. Initialize error reporting (typically in `main.ts`):
-
-```typescript
-import { initializeErrorReporting } from 'nugi-logs-sdk';
-
-initializeErrorReporting({
-  apiKey: 'your-api-key',
-  appId: 'your-app-id',
-  environment: 'production',
-  apiUrl: 'https://your-logging-server.com/api/logs' // optional
-});
-```
-
-2. Use the `ReportError` function in your catch blocks:
-
-```typescript
-import { ReportError } from 'nugi-logs-sdk';
-
-// Basic usage
-try {
-  throw new Error('Something went wrong');
-} catch (error) {
-  await ReportError(error);
-}
-
-// With additional context
-try {
-  await someApiCall();
-} catch (error) {
-  await ReportError(error, {
-    code: 'API_ERROR',
-    context: {
-      endpoint: '/api/data',
-      method: 'GET',
-      userId: '123'
-    }
-  });
-}
-```
-
-### What Gets Logged
-
-The SDK automatically logs:
-
-1. **Request Information**:
-   - Request ID (for correlation) + `traceId` / `spanId`
-   - Timestamp
-   - HTTP method, URL
-   - User agent, IP address
-   - Sanitized request headers
-   - Request size (bytes)
-   - Authenticated user ID (from `req.user`, when present)
-   - Request body (with sensitive data redacted)
-
-2. **Response Information**:
-   - Request ID (for correlation) + `traceId` / `spanId`
-   - Timestamp
-   - Status code
-   - Response time and response size (bytes)
-   - Response body (with sensitive data redacted)
-
-3. **Host & Runtime Metadata** (attached to every log as `meta`):
-   - hostname, server IP, service name, environment
-   - SDK version, Node.js version, OS, process ID
-   - Memory usage (rss/heap/external) and CPU usage
-
-4. **Error Information**:
-   - Error name, message, stack trace, custom code
-   - Additional context
-   - System information (Node.js version, platform)
-
-### Database Query Logging
-
-Inject `LoggingService` and record slow/notable queries:
+Inject `LoggingService` to emit structured log events from anywhere in your app:
 
 ```typescript
 import { LoggingService } from 'nugi-logs-sdk';
 
-constructor(private readonly logging: LoggingService) {}
+@Injectable()
+export class PaymentService {
+  constructor(private readonly logger: LoggingService) {}
 
-const start = Date.now();
-const rows = await this.db.query(sql);
-this.logging.logQuery(sql, Date.now() - start, requestId); // never throws / non-blocking
+  async charge(userId: string, amount: number) {
+    this.logger.info('Processing payment', { userId, amount });
+    try {
+      const result = await this.stripe.charge(amount);
+      this.logger.info('Payment succeeded', { userId, chargeId: result.id });
+    } catch (err) {
+      this.logger.error('Payment failed', { userId, error: err.message });
+      throw err;
+    }
+  }
+}
 ```
 
-### Sensitive Data Handling
+All levels: `debug()`, `info()`, `warn()`, `error()`, `log(level, message, attributes?)`.
 
-The SDK automatically redacts sensitive information from request/response bodies **and** headers. Built-in patterns (substring, case-insensitive) cover:
-- Passwords (`password`, `passwd`, `pwd`)
-- Tokens & secrets (`token`, `secret`, `apiKey`, `credential`)
-- Auth material (`authorization`, `cookie`, `session`, `private`)
+Each call ships a `type: 'log'` event to the server and records a breadcrumb.
 
-**Custom fields** — pass a `redact` array to redact your own fields (exact field name, case-insensitive, at any depth):
+## Console Capture
+
+Enabled by default (`captureConsole: true`). The SDK monkey-patches `console.debug/info/log/warn/error` so your existing `console.log()` calls become telemetry — useful for services with zero HTTP traffic.
+
+- Original behavior is always preserved
+- Re-entrancy guarded (SDK's own logs don't recurse)
+- Each call becomes a breadcrumb for error context
+
+Disable with `captureConsole: false`.
+
+## NestJS Logger Bridge
+
+Replace NestJS's built-in logger so framework logs (bootstrap, route registration, errors) become structured telemetry:
+
+```typescript
+import { NugiLoggerService } from 'nugi-logs-sdk';
+
+const app = await NestFactory.create(AppModule, { bufferLogs: true });
+app.useLogger(app.get(NugiLoggerService));
+```
+
+## Error Reporting
+
+```typescript
+import { initializeErrorReporting, ReportError } from 'nugi-logs-sdk';
+
+// In main.ts — before app bootstrap
+initializeErrorReporting({
+  apiKey: 'nugi_sk_...',
+  appId: 'your-app-id',
+  environment: 'production',
+  apiUrl: 'https://your-server.com/api/v1/logs',
+});
+
+// In catch blocks anywhere
+try {
+  await riskyOperation();
+} catch (error) {
+  await ReportError(error, {
+    code: 'PAYMENT_FAILED',
+    mechanism: 'manual',
+    handled: true,
+    context: { userId: '123', orderId: 'abc' },
+  });
+}
+```
+
+Error reports include:
+- Error name, message, stack trace
+- Breadcrumb trail (console output + structured logs leading up to the error)
+- Host & runtime metadata snapshot
+- `handled` / `mechanism` flags (Sentry-style)
+
+Reports are posted to `<apiUrl>/errors`.
+
+## Database Query Logging
+
+```typescript
+import { LoggingService } from 'nugi-logs-sdk';
+
+@Injectable()
+export class UserRepository {
+  constructor(private readonly logger: LoggingService) {}
+
+  async findById(id: string) {
+    const start = Date.now();
+    const user = await this.db.query('SELECT * FROM users WHERE id = $1', [id]);
+    this.logger.logQuery('SELECT * FROM users WHERE id = $1', Date.now() - start, requestId);
+    return user;
+  }
+}
+```
+
+## IP Resolution
+
+### Server IP
+
+The SDK resolves all non-internal network interfaces at startup and caches the result:
+
+```typescript
+// HostMetadata.serverIp  → primary IP (prefers IPv4, falls back to IPv6)
+// HostMetadata.serverIps → { ipv4: string[], ipv6: string[] }
+```
+
+- Collects both IPv4 and IPv6 addresses
+- Skips internal/loopback interfaces
+- Skips link-local `fe80::` IPv6 addresses
+- Handles Node 18.4+ numeric family values
+
+### Client IP
+
+The middleware resolves the real client IP from each request:
+
+1. Checks `x-forwarded-for` header (first entry = real client behind proxy/LB)
+2. Falls back to `req.ip` → `req.socket.remoteAddress`
+3. Normalizes IPv4-mapped IPv6 (`::ffff:10.0.0.1` → `10.0.0.1`)
+
+## Sensitive Data Redaction
+
+Bodies and headers are deep-redacted before leaving the process.
+
+**Built-in patterns** (substring, case-insensitive):
+`password`, `passwd`, `pwd`, `token`, `secret`, `apikey`, `api-key`, `authorization`, `auth`, `cookie`, `session`, `credential`, `private`
+
+**Custom fields** — add your own via the `redact` option:
 
 ```typescript
 LoggingModule.forRoot({
-  apiKey: 'your-api-key',
-  appId: 'your-app-id',
+  apiKey: '...',
+  appId: '...',
   environment: 'production',
   redact: ['ssn', 'accountNumber', 'x-tenant-id'],
 });
 ```
 
-### Reliability
+Redaction is depth-limited (6 levels), cycle-safe, and never mutates the original object.
 
-Logging never crashes or blocks your application:
-- All collection and delivery runs in `try/catch`; failures are swallowed (logged locally at most).
-- Log delivery is **fire-and-forget** — requests are never held waiting on the network.
-- Outbound requests have a **5s timeout**; a slow/unreachable backend can't pile up.
+## What Gets Logged
 
-### Custom Route Configuration
+### HTTP Requests (automatic via middleware)
 
-You can customize which routes the middleware applies to:
+| Field | Description |
+|-------|-------------|
+| `requestId` | UUID v4 for req/res correlation |
+| `traceId` / `spanId` | From headers or auto-generated |
+| `method`, `url`, `path` | HTTP method and URL |
+| `ip` | Normalized client IP |
+| `userAgent` | User-Agent header |
+| `headers` | Sanitized request headers |
+| `requestSize` / `responseSize` | Payload sizes in bytes |
+| `userId` | From `req.user` (Passport/JWT) |
+| `body` | Redacted request/response body |
+| `statusCode`, `responseTime` | Response status and timing |
+
+### Host & Runtime Metadata (on every outbound log)
+
+| Field | Description |
+|-------|-------------|
+| `hostname` | Machine hostname |
+| `serverIp` | Primary server IP |
+| `serverIps` | `{ ipv4: [...], ipv6: [...] }` |
+| `sdkVersion` | SDK package version |
+| `nodeVersion` | Node.js version |
+| `os` | OS type, release, platform, arch |
+| `pid` | Process ID |
+| `memoryUsage` | RSS, heap used/total, external |
+| `cpuUsage` | CPU % (delta-based), user, system |
+
+## Reliability
+
+- All capture and delivery runs in `try/catch` — failures are swallowed
+- Log delivery is **fire-and-forget** — never blocks the request pipeline
+- Outbound requests have a **5-second timeout**
+- The middleware always calls `next()` even if setup fails
+- Stale pending logs are cleaned up every 5 minutes (30-minute TTL)
+
+## Custom Route Configuration
+
+Override `LoggingModule.configure()` to scope the middleware:
 
 ```typescript
-import { Module, RequestMethod } from '@nestjs/common';
-import { LoggingModule, LoggingMiddleware } from 'nugi-logs-sdk';
-
 @Module({
-  imports: [LoggingModule.forRoot({
-    apiKey: 'your-api-key',
-    appId: 'your-app-id',
-    environment: 'production'
-  })],
+  imports: [LoggingModule.forRoot({ ... })],
 })
 export class AppModule extends LoggingModule {
   configure(consumer: MiddlewareConsumer) {
@@ -224,39 +266,31 @@ export class AppModule extends LoggingModule {
 }
 ```
 
-### Local-Only Logging
+## Exports
 
-If you don't provide an `apiUrl`, the SDK will only log locally (using NestJS Logger). This is useful for development or when you want to handle the logs yourself:
+### NestJS Integration
+- `LoggingModule` — dynamic module with `forRoot(options)`
+- `LoggingMiddleware` — Express middleware (default HTTP capture)
+- `LoggingService` — core logging + delivery service
+- `NugiLoggerService` — NestJS `LoggerService` implementation
 
-```typescript
-LoggingModule.forRoot({
-  apiKey: 'your-api-key',
-  appId: 'your-app-id',
-  environment: 'development'
-  // No apiUrl - logs will only be stored locally
-})
-```
+### Error Reporting
+- `initializeErrorReporting(config)` — set global error config
+- `ReportError(error, metadata?)` — ship error + breadcrumbs
 
-## Error Reporting Types
+### Types
+- `LoggingOptions`, `LogLevel`
+- `BaseLog`, `RequestLog`, `ResponseLog`, `CombinedLog`, `LogMetadata`
+- `ErrorMetadata`, `ErrorReportingConfig`
+- `HostMetadata`, `RuntimeMetadata`, `TraceContext`
+- `Breadcrumb`, `BreadcrumbLevel`, `BreadcrumbBuffer`
+- `ConsoleCapture`, `ConsoleMethod`, `ConsoleLogRecord`
 
-The SDK provides TypeScript types for error reporting:
-
-```typescript
-interface ErrorMetadata {
-  message?: string;
-  stack?: string;
-  code?: string | number;
-  context?: Record<string, any>;
-}
-
-interface ErrorReportingConfig {
-  apiKey: string;
-  appId: string;
-  environment: string;
-  apiUrl?: string;
-}
-```
+### Utilities
+- `getHostMetadata()`, `getRuntimeMetadata()`, `extractTraceContext(headers)`
+- `sanitizeBody()`, `sanitizeHeaders()`, `REDACTED`
+- `sharedBreadcrumbs` — process-wide breadcrumb buffer
 
 ## License
 
-MIT 
+MIT
