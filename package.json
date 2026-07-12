@@ -1,6 +1,6 @@
 {
   "name": "nugi-logs-sdk",
-  "version": "1.8.0",
+  "version": "1.10.7",
   "description": "NestJS logging SDK for saving logs to a backend server",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -17,7 +17,7 @@
   "keywords": [
     "nestjs",
     "logging",
-    "sdk",
+    "sdk",1
     "middleware",
     "request",
     "response"

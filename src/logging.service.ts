@@ -4,6 +4,18 @@ import { RequestLog, ResponseLog, CombinedLog, LogMetadata } from './interfaces/
 import { getHostMetadata, getRuntimeMetadata } from './metadata';
 import { sharedBreadcrumbs, BreadcrumbLevel } from './breadcrumbs';
 import { ConsoleCapture, ConsoleMethod } from './console.capture';
+import { startQueryCapture, instrumentPrisma, type QueryCaptureInfo } from './query.capture';
+import {
+  initializeMetrics,
+  metrics,
+  setAttributes,
+  withScope,
+  type BeforeSendMetric,
+  type MetricsApi,
+} from './metrics';
+import { initializeSpans, spans, getActiveSpan, type SpansApi } from './spans';
+import { initializeCheckins, checkins, type CheckinsApi } from './checkins';
+import { initializeErrorReporting } from './error.reporting';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'fatal';
 
@@ -14,6 +26,8 @@ export interface LoggingOptions {
   environment: string;
   // Logical name of the service emitting logs. Defaults to appId.
   serviceName?: string;
+  /** Deploy / release version attached to every event (e.g. git sha or semver). */
+  release?: string;
   // Extra field names to redact from captured bodies/headers, in addition to
   // the built-in sensitive patterns. Case-insensitive exact match, any depth.
   redact?: string[];
@@ -25,6 +39,25 @@ export interface LoggingOptions {
   consoleLevels?: ConsoleMethod[];
   // Max breadcrumbs retained and attached to error reports. Default 50.
   maxBreadcrumbs?: number;
+  /**
+   * Auto-instrument pg / mysql2 / sequelize queries and ship them as
+   * `type: 'query'` events (+ breadcrumbs). Default true.
+   * For Prisma, wrap your client with `instrumentPrisma(prisma)` (exported).
+   */
+  captureQueries?: boolean;
+  /**
+   * Queries slower than this (ms) are flagged as slow in telemetry and metrics.
+   * Default 500.
+   */
+  slowQueryThresholdMs?: number;
+  /** Enable application metrics (count / gauge / distribution). Default true. */
+  enableMetrics?: boolean;
+  /** Filter or mutate metrics before send. Return null to drop. */
+  beforeSendMetric?: BeforeSendMetric;
+  /** Enable span emission (start / withSpan). Default true. */
+  enableSpans?: boolean;
+  /** Enable cron monitor check-ins. Default true. */
+  enableCheckins?: boolean;
 }
 
 // Logging must never block or slow down the host application. Cap every
@@ -39,6 +72,7 @@ export class LoggingService implements OnModuleInit, OnModuleDestroy {
   private readonly appId: string;
   private readonly environment: string;
   private readonly serviceName: string;
+  private readonly release?: string;
   // Extra field names to redact, exposed for the middleware/interceptor.
   readonly redact: string[];
   private readonly pendingLogs: Map<string, Partial<CombinedLog>> = new Map();
@@ -46,6 +80,9 @@ export class LoggingService implements OnModuleInit, OnModuleDestroy {
   private readonly captureConsole: boolean;
   private readonly consoleLevels: ConsoleMethod[];
   private consoleCapture?: ConsoleCapture;
+  private readonly captureQueries: boolean;
+  private readonly slowQueryThresholdMs: number;
+  private stopQueryCapture?: () => void;
 
   constructor(options: LoggingOptions) {
     if (!options.apiKey) {
@@ -63,6 +100,7 @@ export class LoggingService implements OnModuleInit, OnModuleDestroy {
     this.appId = options.appId;
     this.environment = options.environment;
     this.serviceName = options.serviceName ?? options.appId;
+    this.release = options.release;
     this.redact = Array.isArray(options.redact)
       ? options.redact.filter((k) => typeof k === 'string' && k.length > 0)
       : [];
@@ -71,8 +109,71 @@ export class LoggingService implements OnModuleInit, OnModuleDestroy {
       Array.isArray(options.consoleLevels) && options.consoleLevels.length > 0
         ? options.consoleLevels
         : ['debug', 'info', 'log', 'warn', 'error'];
+    this.captureQueries = options.captureQueries ?? true;
+    this.slowQueryThresholdMs = Math.max(
+      1,
+      Number(options.slowQueryThresholdMs) || 500,
+    );
     sharedBreadcrumbs.setCapacity(options.maxBreadcrumbs ?? 50);
+
+    if (options.enableMetrics !== false) {
+      initializeMetrics({
+        apiUrl: options.apiUrl,
+        apiKey: options.apiKey,
+        appId: options.appId,
+        environment: options.environment,
+        serviceName: options.serviceName ?? options.appId,
+        release: options.release,
+        beforeSendMetric: options.beforeSendMetric,
+      });
+    }
+
+    if (options.enableSpans !== false) {
+      initializeSpans({
+        apiUrl: options.apiUrl,
+        apiKey: options.apiKey,
+        appId: options.appId,
+        environment: options.environment,
+        serviceName: options.serviceName ?? options.appId,
+        release: options.release,
+      });
+    }
+
+    if (options.enableCheckins !== false) {
+      initializeCheckins({
+        apiUrl: options.apiUrl,
+        apiKey: options.apiKey,
+        appId: options.appId,
+      });
+    }
+
+    initializeErrorReporting({
+      apiUrl: options.apiUrl,
+      apiKey: options.apiKey,
+      appId: options.appId,
+      environment: options.environment,
+      serviceName: options.serviceName ?? options.appId,
+      release: options.release,
+    });
   }
+
+  /** Sentry-style metrics API bound to this service's config. */
+  get metrics(): MetricsApi {
+    return metrics;
+  }
+
+  /** Manual span API for tracing work units. */
+  get spans(): SpansApi {
+    return spans;
+  }
+
+  /** Cron monitor check-in API. */
+  get checkins(): CheckinsApi {
+    return checkins;
+  }
+
+  setAttributes = setAttributes;
+  withScope = withScope;
 
   // Assembles host + runtime + service metadata for an outbound log. Host data
   // is cached; runtime data (memory/CPU) is sampled fresh on each call.
@@ -82,6 +183,7 @@ export class LoggingService implements OnModuleInit, OnModuleDestroy {
       ...getRuntimeMetadata(),
       environment: this.environment,
       serviceName: this.serviceName,
+      ...(this.release ? { release: this.release } : {}),
     };
   }
 
@@ -104,6 +206,13 @@ export class LoggingService implements OnModuleInit, OnModuleDestroy {
       });
       this.consoleCapture.start();
     }
+
+    // Auto-capture SQL from pg / mysql2 / sequelize when those packages exist.
+    if (this.captureQueries) {
+      this.stopQueryCapture = startQueryCapture((info) => {
+        void this.captureQuery(info);
+      });
+    }
   }
 
   onModuleDestroy() {
@@ -111,6 +220,7 @@ export class LoggingService implements OnModuleInit, OnModuleDestroy {
       clearInterval(this.cleanupInterval);
     }
     this.consoleCapture?.stop();
+    this.stopQueryCapture?.();
   }
 
   // ---- Manual structured logging -------------------------------------------
@@ -154,6 +264,7 @@ export class LoggingService implements OnModuleInit, OnModuleDestroy {
           appId: this.appId,
           environment: this.environment,
           serviceName: this.serviceName,
+          release: this.release,
           type: 'log',
           level,
           message: String(message),
@@ -239,6 +350,7 @@ export class LoggingService implements OnModuleInit, OnModuleDestroy {
           appId: this.appId,
           environment: this.environment,
           serviceName: this.serviceName,
+          release: this.release,
           traceId: pendingLog.request.traceId ?? pendingLog.response.traceId,
           spanId: pendingLog.request.spanId ?? pendingLog.response.spanId,
           timestamp: new Date().toISOString(),
@@ -270,30 +382,132 @@ export class LoggingService implements OnModuleInit, OnModuleDestroy {
   }
 
   // Never throws and never rejects. Safe to call fire-and-forget.
-  async logQuery(query: string, durationMs: number, requestId?: string): Promise<void> {
+  async logQuery(
+    query: string,
+    durationMs: number,
+    requestId?: string,
+    extra?: { orm?: string; success?: boolean; error?: string },
+  ): Promise<void> {
     try {
-      if (this.apiUrl) {
-        await axios.post(this.apiUrl, {
-          appId: this.appId,
-          environment: this.environment,
-          serviceName: this.serviceName,
-          type: 'query',
-          query,
-          durationMs,
+      const duration = Math.max(0, Number(durationMs) || 0);
+      const slow = duration >= this.slowQueryThresholdMs;
+      const success = extra?.success !== false;
+      const orm = extra?.orm;
+      const ts = new Date().toISOString();
+      const active = getActiveSpan();
+      const traceId = active?.traceId;
+      const parentSpanId = active?.spanId;
+      const sqlPreview =
+        query.length > 200 ? `${query.slice(0, 200)}…` : query;
+
+      sharedBreadcrumbs.add({
+        timestamp: ts,
+        type: 'query',
+        level: !success ? 'error' : slow ? 'warn' : 'info',
+        message: sqlPreview,
+        data: {
+          durationMs: duration,
+          orm,
+          success,
+          slow,
           requestId,
-          timestamp: new Date().toISOString(),
-          meta: this.buildMetadata(),
-        }, {
-          timeout: REQUEST_TIMEOUT_MS,
-          headers: {
-            'Content-Type': 'application/json',
-            'X-API-Key': this.apiKey,
+          traceId,
+        },
+      });
+
+      // Nest DB work under the active HTTP/request span when present.
+      try {
+        spans.recordFinished({
+          name: orm ? `db.${orm}.query` : 'db.query',
+          durationMs: duration,
+          endTime: ts,
+          spanKind: 'client',
+          status: success ? 'ok' : 'error',
+          statusMessage: extra?.error,
+          parentSpanId,
+          traceId,
+          attributes: {
+            'db.system': orm || 'sql',
+            'db.statement':
+              query.length > 1000 ? `${query.slice(0, 1000)}…` : query,
+            'db.duration_ms': duration,
+            'db.slow': slow,
+            ...(success === false ? { 'db.success': false } : {}),
           },
         });
+      } catch {
+        /* spans optional */
+      }
+
+      try {
+        metrics.distribution('db.query.duration', duration, {
+          unit: 'millisecond',
+          attributes: {
+            orm: orm || 'unknown',
+            slow,
+            success,
+          },
+        });
+        if (slow) {
+          metrics.count('db.query.slow', 1, {
+            attributes: { orm: orm || 'unknown' },
+          });
+        }
+      } catch {
+        /* metrics optional */
+      }
+
+      if (this.apiUrl) {
+        await axios.post(
+          this.apiUrl,
+          {
+            appId: this.appId,
+            environment: this.environment,
+            serviceName: this.serviceName,
+            release: this.release,
+            type: 'query',
+            query,
+            durationMs: duration,
+            requestId,
+            orm,
+            success,
+            slow,
+            error: extra?.error,
+            traceId,
+            spanId: parentSpanId,
+            timestamp: ts,
+            meta: this.buildMetadata(),
+          },
+          {
+            timeout: REQUEST_TIMEOUT_MS,
+            headers: {
+              'Content-Type': 'application/json',
+              'X-API-Key': this.apiKey,
+            },
+          },
+        );
       }
     } catch (error) {
       this.logger.error('Failed to send query log to backend server', this.describeError(error));
     }
+  }
+
+  /** Internal handler for auto-instrumented queries. */
+  private captureQuery(info: QueryCaptureInfo): void {
+    void this.logQuery(info.query, info.durationMs, undefined, {
+      orm: info.orm,
+      success: info.success,
+      error: info.error,
+    });
+  }
+
+  /**
+   * Wrap a PrismaClient so queries are captured. Call once at bootstrap:
+   * `const prisma = instrumentPrisma(new PrismaClient(), loggingService)` —
+   * or use the standalone `instrumentPrisma` export with a callback.
+   */
+  wrapPrisma<T extends { $extends: Function }>(prisma: T): T {
+    return instrumentPrisma(prisma, (info) => this.captureQuery(info));
   }
 
   // Compact, safe error description — avoids logging huge axios error objects

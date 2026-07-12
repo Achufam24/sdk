@@ -36,6 +36,7 @@ export interface ResponseLog extends BaseLog {
 export interface LogMetadata extends HostMetadata, RuntimeMetadata {
   environment: string;
   serviceName: string;
+  release?: string;
 }
 
 export interface CombinedLog {
@@ -45,6 +46,7 @@ export interface CombinedLog {
   appId: string;
   environment: string;
   serviceName: string;
+  release?: string;
   timestamp: string;
   traceId?: string;
   spanId?: string;

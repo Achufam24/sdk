@@ -14,8 +14,9 @@ Peer dependencies: `@nestjs/common` (^9 || ^10 || ^11), `rxjs` (^7).
 
 - **HTTP request/response logging** — automatic middleware captures every request lifecycle
 - **Structured manual logging** — `debug()`, `info()`, `warn()`, `error()`, `log()` APIs
-- **Database query logging** — `logQuery()` for SQL timing telemetry
-- **Error reporting** — `ReportError()` with Sentry-style breadcrumb trail
+- **Application metrics** — Sentry-style `count` / `gauge` / `distribution` with attributes & scopes
+- **Database query logging** — auto-capture for `pg` / `mysql2` / `sequelize` (+ Prisma helper)
+- **Error reporting** — `ReportError()` with Sentry-style frames + source context + breadcrumbs
 - **Console capture** — monkey-patches `console.*` to ship logs even with zero HTTP traffic
 - **NestJS Logger bridge** — `NugiLoggerService` replaces the built-in framework logger
 - **Distributed tracing** — W3C `traceparent`, `x-trace-id`, `x-b3-traceid`, `x-amzn-trace-id`
@@ -59,10 +60,141 @@ This applies `LoggingMiddleware` to all routes automatically.
 | `captureConsole` | No | `true` | Intercept `console.*` and ship as telemetry |
 | `consoleLevels` | No | all | Which console methods to capture: `debug`, `info`, `log`, `warn`, `error` |
 | `maxBreadcrumbs` | No | `50` | Ring buffer capacity for error context trail |
+| `captureQueries` | No | `true` | Auto-instrument `pg` / `mysql2` / `sequelize` SQL |
+| `slowQueryThresholdMs` | No | `500` | Queries at/above this duration are flagged slow + counted in `db.query.slow` |
+| `enableMetrics` | No | `true` | Enable `metrics.count` / `gauge` / `distribution` |
+| `beforeSendMetric` | No | — | Hook to filter/mutate metrics; return `null` to drop |
 
 > **`apiUrl` must include the endpoint path** (e.g. `/api/v1/logs`). The SDK sends directly to this URL.
 
-## Structured Logging
+## Application Metrics
+
+Metrics let you track numeric application health signals and correlate them with logs and errors in the Nugi admin **Metrics** view. Enabled automatically when you use `LoggingModule.forRoot`.
+
+With the HTTP middleware installed, each response also auto-emits:
+
+- `http.server.requests` (count)
+- `http.server.duration` (distribution, ms)
+- `http.server.errors` / `http.server.client_errors` (count, for 5xx / 4xx)
+
+### Metric types
+
+| Type | API | Use for |
+|------|-----|---------|
+| **Count** | `metrics.count(name, value?)` | Occurrences — orders, clicks, API calls |
+| **Gauge** | `metrics.gauge(name, value)` | Point-in-time values — queue depth, connections |
+| **Distribution** | `metrics.distribution(name, value, opts?)` | Value ranges — latency, payload size |
+
+### Basic usage
+
+```typescript
+import { metrics } from 'nugi-logs-sdk';
+// or: this.logging.metrics  (inject LoggingService)
+
+// Count occurrences
+metrics.count('orders_created', 1);
+
+// Track current values
+metrics.gauge('active_connections', 42);
+
+// Track distributions (with unit)
+metrics.distribution('api_latency', 187, {
+  unit: 'millisecond',
+});
+```
+
+### Attributes (filtering & grouping)
+
+Attach metadata to filter and group metrics in the dashboard. Common uses: environment segmentation, feature flags, user tier.
+
+There is a **2KB size limit** per metric's attributes — exceeding it drops the metric.
+
+```typescript
+metrics.count('api_calls', 1, {
+  attributes: {
+    endpoint: '/api/orders',
+    user_tier: 'pro',
+    region: 'us-west',
+  },
+});
+```
+
+### Shared attributes
+
+**Global** — apply to every metric:
+
+```typescript
+import { setAttributes } from 'nugi-logs-sdk';
+
+setAttributes({
+  is_admin: true,
+  auth_provider: 'google',
+});
+```
+
+**Scoped** — apply only inside a callback:
+
+```typescript
+import { metrics, withScope } from 'nugi-logs-sdk';
+
+withScope((scope) => {
+  scope.setAttribute('step', 'authentication');
+
+  // Includes global attrs + step=authentication
+  metrics.count('clicks', 1);
+  metrics.gauge('time_since_refresh', 4, { unit: 'second' });
+});
+```
+
+### Units
+
+Specify units on gauges and distributions for readable display:
+
+```typescript
+metrics.distribution('response_time', 187.5, { unit: 'millisecond' });
+metrics.gauge('memory_usage', 1024, { unit: 'byte' });
+```
+
+Common units: `millisecond`, `second`, `byte`, `kilobyte`, `megabyte`.
+
+### `beforeSendMetric`
+
+Filter or mutate metrics before they leave the process. Return `null` to drop:
+
+```typescript
+LoggingModule.forRoot({
+  apiUrl: '...',
+  apiKey: '...',
+  appId: '...',
+  environment: 'production',
+  beforeSendMetric(metric) {
+    if (metric.name === 'debug_metric') return null;
+    return {
+      ...metric,
+      attributes: { ...metric.attributes, processed: true },
+    };
+  },
+});
+```
+
+### NestJS injection
+
+```typescript
+import { LoggingService } from 'nugi-logs-sdk';
+
+@Injectable()
+export class CheckoutService {
+  constructor(private readonly logging: LoggingService) {}
+
+  async complete(orderId: string) {
+    this.logging.metrics.count('checkout.completed', 1, {
+      attributes: { order_id: orderId },
+    });
+  }
+}
+```
+
+Metrics are POSTed as `type: 'metric'` to your `apiUrl` and appear under **Observability → Metrics** in the admin UI.
 
 Inject `LoggingService` to emit structured log events from anywhere in your app:
 
@@ -138,29 +270,67 @@ try {
 ```
 
 Error reports include:
-- Error name, message, stack trace
-- Breadcrumb trail (console output + structured logs leading up to the error)
+- Error name, message, raw stack string
+- **Structured stack frames** with Sentry-style source context (`preContext`, `contextLine`, `postContext`) read from disk at capture time
+- `inApp` flags (application vs `node_modules`)
+- Breadcrumb trail (console, structured logs, **SQL queries**)
 - Host & runtime metadata snapshot
-- `handled` / `mechanism` flags (Sentry-style)
+- `handled` / `mechanism` flags
 
 Reports are posted to `<apiUrl>/errors`.
 
 ## Database Query Logging
 
+### Automatic (default)
+
+With `captureQueries: true` (default), the SDK patches common drivers when they are installed:
+
+- `pg` (Client + Pool)
+- `mysql2`
+- `sequelize` (`Sequelize.prototype.query`)
+
+Every query is shipped as `type: 'query'` and recorded as a breadcrumb for later error reports.
+Slow queries (≥ `slowQueryThresholdMs`, default 500ms) are also:
+
+- tagged `slow: true` on the query event
+- emitted as a nested `db.*.query` client span (when an HTTP/request span is active)
+- recorded as `db.query.duration` (distribution) and `db.query.slow` (counter) metrics
+
 ```typescript
-import { LoggingService } from 'nugi-logs-sdk';
+LoggingModule.forRoot({
+  apiUrl: '...',
+  apiKey: '...',
+  appId: '...',
+  environment: 'production',
+  captureQueries: true, // default
+  slowQueryThresholdMs: 500, // default
+});
+```
 
-@Injectable()
-export class UserRepository {
-  constructor(private readonly logger: LoggingService) {}
+### Prisma
 
-  async findById(id: string) {
-    const start = Date.now();
-    const user = await this.db.query('SELECT * FROM users WHERE id = $1', [id]);
-    this.logger.logQuery('SELECT * FROM users WHERE id = $1', Date.now() - start, requestId);
-    return user;
-  }
+Prisma uses its own engine — wrap the client once:
+
+```typescript
+import { instrumentPrisma } from 'nugi-logs-sdk';
+// or: loggingService.wrapPrisma(prisma)
+
+const prisma = instrumentPrisma(new PrismaClient(), (info) => {
+  // optional custom handler — LoggingService.wrapPrisma wires this for you
+});
+```
+
+```typescript
+// Preferred with Nest DI
+constructor(private readonly logging: LoggingService) {
+  this.prisma = this.logging.wrapPrisma(new PrismaClient());
 }
+```
+
+### Manual
+
+```typescript
+this.logger.logQuery('SELECT * FROM users WHERE id = $1', Date.now() - start, requestId);
 ```
 
 ## IP Resolution
@@ -276,12 +446,18 @@ export class AppModule extends LoggingModule {
 
 ### Error Reporting
 - `initializeErrorReporting(config)` — set global error config
-- `ReportError(error, metadata?)` — ship error + breadcrumbs
+- `ReportError(error, metadata?)` — ship error + breadcrumbs + source frames
+
+### Metrics
+- `metrics.count` / `metrics.gauge` / `metrics.distribution`
+- `setAttributes`, `withScope`, `initializeMetrics`
+- `LoggingService.metrics` — same API via DI
 
 ### Types
 - `LoggingOptions`, `LogLevel`
 - `BaseLog`, `RequestLog`, `ResponseLog`, `CombinedLog`, `LogMetadata`
-- `ErrorMetadata`, `ErrorReportingConfig`
+- `ErrorMetadata`, `ErrorReportingConfig`, `StackFrame`
+- `MetricOptions`, `MetricEventPayload`, `BeforeSendMetric`, `MetricAttributeValue`
 - `HostMetadata`, `RuntimeMetadata`, `TraceContext`
 - `Breadcrumb`, `BreadcrumbLevel`, `BreadcrumbBuffer`
 - `ConsoleCapture`, `ConsoleMethod`, `ConsoleLogRecord`

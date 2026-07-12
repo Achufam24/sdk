@@ -6,7 +6,7 @@ export type BreadcrumbLevel = 'debug' | 'info' | 'warn' | 'error' | 'fatal';
 
 export interface Breadcrumb {
   timestamp: string;
-  type: string; // 'console' | 'log' | 'http' | custom
+  type: string; // 'console' | 'log' | 'http' | 'query' | custom
   level: BreadcrumbLevel;
   message: string;
   data?: Record<string, unknown>;
